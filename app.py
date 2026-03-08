@@ -106,13 +106,13 @@ class SledAnalyzerApp(QMainWindow):
         top_layout.addWidget(control_group, stretch=1)
         
         # --- Offset Table Panel (Right) ---
-        offset_group = QGroupBox("Select Offset Model Variables (ms)")
+        offset_group = QGroupBox("Grafik Offset Ayarları (ms)")
         offset_layout = QVBoxLayout()
         offset_group.setLayout(offset_layout)
         
         self.table_offset = QTableWidget()
         self.table_offset.setColumnCount(3)
-        self.table_offset.setHorizontalHeaderLabels(["Variable / Graph", "Current Value", "Used By"])
+        self.table_offset.setHorizontalHeaderLabels(["Değişken / Grafik", "Mevcut Değer", "Kullanım Yeri"])
         self.table_offset.setRowCount(3)
         self.table_offset.verticalHeader().setVisible(False)
         self.table_offset.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -129,7 +129,7 @@ class SledAnalyzerApp(QMainWindow):
         
         # Populate Table
         labels = ["Spul", "Acceleration vs Velocity", "Actual vs Target Acceleration"]
-        used_by = ["Spul Calculation", "Velocity & Acc plots", "Pulse Comparison"]
+        used_by = ["Spul Hesaplaması", "Hız ve İvme Grafikleri", "İvme Karşılaştırması"]
         
         self.spin_offsets = []
         for i in range(3):
@@ -159,7 +159,7 @@ class SledAnalyzerApp(QMainWindow):
         
         # Universal Offset input at bottom of table
         univ_layout = QHBoxLayout()
-        univ_layout.addWidget(QLabel("Add universal offset to all variables:"))
+        univ_layout.addWidget(QLabel("Tüm grafiklere aynı anda evrensel offset uygula:"))
         self.spin_universal = QDoubleSpinBox()
         self.spin_universal.setRange(-10000.0, 10000.0)
         self.spin_universal.setValue(0.0)
