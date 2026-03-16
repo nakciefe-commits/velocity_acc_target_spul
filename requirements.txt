@@ -1,0 +1,8 @@
+PyQt5
+pandas
+numpy
+matplotlib
+openpyxl
+docxtpl
+python-docx
+xlrd
