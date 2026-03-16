@@ -1,4 +1,6 @@
 import os
+import io
+import tempfile
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
@@ -21,9 +23,70 @@ from PyQt5.QtCore import Qt
 from docx import Document
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Mm
+from docx.shared import Mm, Twips, Pt
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+
+from PIL import Image
 
 import shared.global_data as global_data
+
+
+# Template'teki satir yüksekligi (twips cinsinden)
+ROW_HEIGHT_TWIPS = 3768
+CELL_WIDTH_MM = 86
+PHOTO_WIDTH_MM = 80
+# Sikistirma ayarlari
+COMPRESS_MAX_WIDTH = 1200
+COMPRESS_QUALITY = 75
+
+
+def compress_photo(photo_path):
+    """Fotoğrafı sıkıştırıp geçici dosya olarak döndürür."""
+    img = Image.open(photo_path)
+
+    # EXIF orientation düzelt
+    try:
+        from PIL import ExifTags
+        for orientation_key in ExifTags.TAGS:
+            if ExifTags.TAGS[orientation_key] == "Orientation":
+                break
+        exif = img._getexif()
+        if exif and orientation_key in exif:
+            orient = exif[orientation_key]
+            if orient == 3:
+                img = img.rotate(180, expand=True)
+            elif orient == 6:
+                img = img.rotate(270, expand=True)
+            elif orient == 8:
+                img = img.rotate(90, expand=True)
+    except Exception:
+        pass
+
+    # Boyut küçült
+    if img.width > COMPRESS_MAX_WIDTH:
+        ratio = COMPRESS_MAX_WIDTH / img.width
+        new_h = int(img.height * ratio)
+        img = img.resize((COMPRESS_MAX_WIDTH, new_h), Image.LANCZOS)
+
+    # RGB'ye çevir (PNG transparanlık sorunu)
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=COMPRESS_QUALITY, optimize=True)
+    buf.seek(0)
+    return buf
+
+
+def _set_row_height(row, height_twips):
+    """Satır yüksekliğini twips cinsinden ayarlar."""
+    tr = row._tr
+    trPr = tr.get_or_add_trPr()
+    trHeight = OxmlElement("w:trHeight")
+    trHeight.set(qn("w:val"), str(height_twips))
+    trHeight.set(qn("w:hRule"), "atLeast")
+    trPr.append(trHeight)
 
 
 class PhotoReportApp(QMainWindow):
@@ -49,6 +112,14 @@ class PhotoReportApp(QMainWindow):
             "template": "HANDLE_SIDE_COVER.docx",
             "color": "#9C27B0",
         },
+    }
+
+    # Her kategorinin başlık metni (template'teki ile aynı)
+    CATEGORY_TITLES = {
+        "PRE": "PRE TEST PHOTOS",
+        "POST": "POST TEST PHOTOS",
+        "TEARDOWN": "TEAR DOWN PHOTOS",
+        "HANDLE_SIDE_COVER": "Handle Side Cover Photos",
     }
 
     def __init__(self, main_window=None):
@@ -116,7 +187,17 @@ class PhotoReportApp(QMainWindow):
         btn_select.clicked.connect(lambda _, c=category: self.select_photos(c))
         button_row.addWidget(btn_select)
 
-        btn_reset = QPushButton("Listeyi temizle")
+        btn_up = QPushButton("▲")
+        btn_up.setFixedWidth(36)
+        btn_up.clicked.connect(lambda _, c=category: self.move_photo(c, -1))
+        button_row.addWidget(btn_up)
+
+        btn_down = QPushButton("▼")
+        btn_down.setFixedWidth(36)
+        btn_down.clicked.connect(lambda _, c=category: self.move_photo(c, 1))
+        button_row.addWidget(btn_down)
+
+        btn_reset = QPushButton("Tümünü temizle")
         btn_reset.clicked.connect(lambda _, c=category: self.clear_category(c))
         button_row.addWidget(btn_reset)
 
@@ -154,6 +235,23 @@ class PhotoReportApp(QMainWindow):
 
         self._refresh_list(category)
 
+    def move_photo(self, category, direction):
+        list_widget = self.list_widgets[category]
+        selected = list_widget.selectedIndexes()
+        if not selected or not self.selected_files[category]:
+            return
+
+        row = selected[0].row()
+        files = self.selected_files[category]
+        new_row = row + direction
+
+        if new_row < 0 or new_row >= len(files):
+            return
+
+        files[row], files[new_row] = files[new_row], files[row]
+        self._refresh_list(category)
+        list_widget.setCurrentRow(new_row)
+
     def clear_category(self, category):
         self.selected_files[category] = []
         self._refresh_list(category)
@@ -168,8 +266,8 @@ class PhotoReportApp(QMainWindow):
             list_widget.item(0).setFlags(Qt.NoItemFlags)
             return
 
-        for photo in files:
-            list_widget.addItem(QListWidgetItem(os.path.basename(photo)))
+        for i, photo in enumerate(files):
+            list_widget.addItem(QListWidgetItem(f"{i+1}. {os.path.basename(photo)}"))
 
     def _ensure_output_dir(self):
         root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -201,21 +299,55 @@ class PhotoReportApp(QMainWindow):
     def _chunk_photos(self, photos, size=6):
         return [photos[idx : idx + size] for idx in range(0, len(photos), size)]
 
-    def _remove_template_tables(self, doc):
-        for table in list(doc.tables):
-            table._element.getparent().remove(table._element)
+    def _get_title_paragraph(self, doc):
+        """Template'teki başlık paragrafını bulur."""
+        for p in doc.paragraphs:
+            if p.text.strip():
+                return p
+        return None
 
-    def _insert_photo_into_cell(self, cell, photo_path):
+    def _copy_paragraph_format(self, source_para):
+        """Paragraf formatını (font, alignment, bold vb.) dict olarak saklar."""
+        fmt = {
+            "alignment": source_para.alignment,
+            "bold": None,
+            "font_size": None,
+            "font_name": None,
+        }
+        if source_para.runs:
+            run = source_para.runs[0]
+            fmt["bold"] = run.bold
+            fmt["font_size"] = run.font.size
+            fmt["font_name"] = run.font.name
+        return fmt
+
+    def _insert_title(self, doc, title_text, fmt):
+        """Başlık paragrafı ekler (template formatında)."""
+        para = doc.add_paragraph()
+        para.alignment = fmt.get("alignment") or WD_ALIGN_PARAGRAPH.CENTER
+        run = para.add_run(title_text)
+        run.bold = fmt.get("bold", True)
+        if fmt.get("font_size"):
+            run.font.size = fmt["font_size"]
+        if fmt.get("font_name"):
+            run.font.name = fmt["font_name"]
+        return para
+
+    def _insert_photo_into_cell(self, cell, photo_buf):
         paragraph = cell.paragraphs[0]
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
         run = paragraph.add_run()
-        run.add_picture(photo_path, width=Mm(78))
+        run.add_picture(photo_buf, width=Mm(PHOTO_WIDTH_MM))
 
-    def _add_photo_page(self, doc, photo_chunk):
-        # 2x3 düzen: 3 satır x 2 sütun = 6 slot
+    def _add_photo_table(self, doc, photo_chunk, compressed_cache):
+        """3 satır x 2 sütun tablo ekler, template boyutlarında."""
         table = doc.add_table(rows=3, cols=2)
         table.style = "Table Grid"
+
+        # Satir yüksekliklerini template ile ayni yap
+        for row in table.rows:
+            _set_row_height(row, ROW_HEIGHT_TWIPS)
 
         for idx in range(6):
             row_idx = idx // 2
@@ -223,21 +355,49 @@ class PhotoReportApp(QMainWindow):
             cell = table.cell(row_idx, col_idx)
             cell.text = ""
             if idx < len(photo_chunk):
-                self._insert_photo_into_cell(cell, photo_chunk[idx])
+                photo_path = photo_chunk[idx]
+                # Sıkıştırılmış halini al (cache'ten veya yeni oluştur)
+                if photo_path not in compressed_cache:
+                    compressed_cache[photo_path] = compress_photo(photo_path)
+                buf = compressed_cache[photo_path]
+                buf.seek(0)
+                self._insert_photo_into_cell(cell, buf)
 
-    def _build_document_from_template(self, template_path, photos):
+    def _build_document_from_template(self, template_path, photos, category):
         doc = Document(template_path)
-        self._remove_template_tables(doc)
+
+        # Başlık formatını kaydet
+        title_para = self._get_title_paragraph(doc)
+        title_text = self.CATEGORY_TITLES.get(category, "PHOTOS")
+        title_fmt = self._copy_paragraph_format(title_para) if title_para else {"bold": True}
+
+        # Template'teki tabloları ve boş paragrafları kaldır
+        # (İlk sayfa: başlık paragrafı + boş tablo)
+        for table in list(doc.tables):
+            table._element.getparent().remove(table._element)
+
+        # Boş paragrafları temizle (başlık hariç)
+        body = doc.element.body
+        for p_elem in list(body.findall(qn("w:p"))):
+            text = p_elem.text or ""
+            # Run'lardaki text'i de topla
+            for r in p_elem.findall(qn("w:r")):
+                t = r.find(qn("w:t"))
+                if t is not None and t.text:
+                    text += t.text
+            if not text.strip():
+                body.remove(p_elem)
 
         photo_chunks = self._chunk_photos(photos, size=6)
-        print(f"[PhotoReport] selected photo count: {len(photos)}")
-        print(f"[PhotoReport] page count (6'lı): {len(photo_chunks)}")
+        compressed_cache = {}
 
         for page_no, chunk in enumerate(photo_chunks, start=1):
             if page_no > 1:
+                # Yeni sayfa + başlık
                 doc.add_page_break()
-            print(f"[PhotoReport] page {page_no}: {len(chunk)} foto")
-            self._add_photo_page(doc, chunk)
+                self._insert_title(doc, title_text, title_fmt)
+
+            self._add_photo_table(doc, chunk, compressed_cache)
 
         return doc
 
@@ -246,7 +406,9 @@ class PhotoReportApp(QMainWindow):
         if not os.path.exists(template_path):
             raise FileNotFoundError(f"Template bulunamadı: {template_path}")
 
-        doc = self._build_document_from_template(template_path, self.selected_files[category])
+        doc = self._build_document_from_template(
+            template_path, self.selected_files[category], category
+        )
         doc.save(output_path)
 
     def generate_reports(self):
@@ -256,20 +418,26 @@ class PhotoReportApp(QMainWindow):
             return
 
         output_dir = self._ensure_output_dir()
+
+        total_photos = sum(len(self.selected_files[c]) for c in selected_categories)
         self.progress.setMinimum(0)
-        self.progress.setMaximum(len(selected_categories))
+        self.progress.setMaximum(total_photos)
         self.progress.setValue(0)
 
         created_files = []
+        progress_count = 0
 
         try:
-            for step, category in enumerate(selected_categories, start=1):
+            for category in selected_categories:
+                self.progress.setFormat(f"{self.CATEGORIES[category]['title']} hazırlanıyor...")
+                QApplication.processEvents()
+
                 output_path = self._safe_output_name(category, output_dir)
                 self._render_category_report(category, output_path)
                 created_files.append(output_path)
 
-                self.progress.setValue(step)
-                self.progress.setFormat(f"%p - {self.CATEGORIES[category]['title']} oluşturuldu")
+                progress_count += len(self.selected_files[category])
+                self.progress.setValue(progress_count)
                 QApplication.processEvents()
 
             result_text = "\n".join(created_files)
@@ -278,10 +446,15 @@ class PhotoReportApp(QMainWindow):
                 "Başarılı",
                 f"{len(created_files)} rapor başarıyla oluşturuldu.\n\nÇıktılar:\n{result_text}",
             )
+            self.progress.setFormat("Tamamlandı")
         except Exception as exc:
             QMessageBox.critical(self, "Hata", f"Rapor oluşturulurken hata oluştu:\n{exc}")
+            self.progress.setFormat("Hata!")
+
+    def closeEvent(self, event):
+        if self.main_window is not None:
+            self.main_window.show()
+        event.accept()
 
     def close_and_return(self):
         self.close()
-        if self.main_window is not None:
-            self.main_window.show()
