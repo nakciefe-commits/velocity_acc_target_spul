@@ -18,7 +18,9 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 
-from docxtpl import DocxTemplate, InlineImage
+from docx import Document
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Mm
 
 import shared.global_data as global_data
@@ -171,7 +173,9 @@ class PhotoReportApp(QMainWindow):
 
     def _ensure_output_dir(self):
         root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        out_dir = os.path.join(root_dir, "tempfiles", "photo_reports")
+        test_no = str(global_data.config.get("TEST_NO") or "UNSPECIFIED").replace("/", "_").replace("\\", "_").strip()
+        date_part = datetime.now().strftime("%Y%m%d")
+        out_dir = os.path.join(root_dir, "tempfiles", "photo_reports", test_no, date_part)
         os.makedirs(out_dir, exist_ok=True)
         return out_dir
 
@@ -194,58 +198,55 @@ class PhotoReportApp(QMainWindow):
 
         return candidate
 
-    def _build_global_context(self):
-        return {
-            "TEST_NO": global_data.config.get("TEST_NO", ""),
-            "TEST_DATE": global_data.config.get("TEST_DATE", ""),
-            "PROJECT": global_data.config.get("PROJECT", ""),
-        }
-
     def _chunk_photos(self, photos, size=6):
         return [photos[idx : idx + size] for idx in range(0, len(photos), size)]
 
-    def _build_render_context(self, category, doc, photos):
+    def _remove_template_tables(self, doc):
+        for table in list(doc.tables):
+            table._element.getparent().remove(table._element)
+
+    def _insert_photo_into_cell(self, cell, photo_path):
+        paragraph = cell.paragraphs[0]
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        run = paragraph.add_run()
+        run.add_picture(photo_path, width=Mm(78))
+
+    def _add_photo_page(self, doc, photo_chunk):
+        # 2x3 düzen: 3 satır x 2 sütun = 6 slot
+        table = doc.add_table(rows=3, cols=2)
+        table.style = "Table Grid"
+
+        for idx in range(6):
+            row_idx = idx // 2
+            col_idx = idx % 2
+            cell = table.cell(row_idx, col_idx)
+            cell.text = ""
+            if idx < len(photo_chunk):
+                self._insert_photo_into_cell(cell, photo_chunk[idx])
+
+    def _build_document_from_template(self, template_path, photos):
+        doc = Document(template_path)
+        self._remove_template_tables(doc)
+
         photo_chunks = self._chunk_photos(photos, size=6)
-        print(f"[PhotoReport][{category}] selected photo count: {len(photos)}")
-        print(f"[PhotoReport][{category}] page group count: {len(photo_chunks)}")
+        print(f"[PhotoReport] selected photo count: {len(photos)}")
+        print(f"[PhotoReport] page count (6'lı): {len(photo_chunks)}")
 
-        pages = []
         for page_no, chunk in enumerate(photo_chunks, start=1):
-            page = {}
-            for slot in range(1, 7):
-                image_index = slot - 1
-                if image_index < len(chunk):
-                    image_path = chunk[image_index]
-                    page[f"photo{slot}"] = InlineImage(doc, image_path, width=Mm(55))
-                    page[f"photo_{slot}"] = page[f"photo{slot}"]
-                    print(f"[PhotoReport][{category}] page {page_no} slot {slot}: {image_path}")
-                else:
-                    page[f"photo{slot}"] = ""
-                    page[f"photo_{slot}"] = ""
-                    print(f"[PhotoReport][{category}] page {page_no} slot {slot}: <EMPTY>")
+            if page_no > 1:
+                doc.add_page_break()
+            print(f"[PhotoReport] page {page_no}: {len(chunk)} foto")
+            self._add_photo_page(doc, chunk)
 
-            page["PAGE_NO"] = page_no
-            page["page_no"] = page_no
-            page["page_break"] = "\f"
-            pages.append(page)
-
-        context = self._build_global_context()
-        context["pages"] = pages
-        context["PAGES"] = pages
-        context["PAGE_BREAK"] = "\f"
-
-        print(f"[PhotoReport][{category}] render context keys: {sorted(context.keys())}")
-        print(f"[PhotoReport][{category}] page keys: {sorted(pages[0].keys()) if pages else []}")
-        return context
+        return doc
 
     def _render_category_report(self, category, output_path):
         template_path = self._resolve_template_path(category)
         if not os.path.exists(template_path):
             raise FileNotFoundError(f"Template bulunamadı: {template_path}")
 
-        doc = DocxTemplate(template_path)
-        context = self._build_render_context(category, doc, self.selected_files[category])
-        doc.render(context)
+        doc = self._build_document_from_template(template_path, self.selected_files[category])
         doc.save(output_path)
 
     def generate_reports(self):
