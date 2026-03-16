@@ -225,16 +225,26 @@ class SledAnalyzerApp(QMainWindow):
         self.btn_report.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
         self.btn_report.clicked.connect(self.generate_word_report)
         
+        self.btn_back = QPushButton("Ana Menüye Dön")
+        self.btn_back.setStyleSheet("background-color: #9E9E9E; color: white; font-weight: bold;")
+        self.btn_back.clicked.connect(self.close)
+
         export_layout.addWidget(self.btn_export)
         export_layout.addWidget(self.btn_report)
-        
+        export_layout.addWidget(self.btn_back)
+
         main_layout.addLayout(export_layout)
-        
+
         # --- Author Info ---
         lbl_author = QLabel("Created by Efe Nakcı")
         lbl_author.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         lbl_author.setStyleSheet("color: gray; font-style: italic; font-size: 11px; padding-top: 5px;")
         main_layout.addWidget(lbl_author)
+
+    def closeEvent(self, event):
+        if self.main_window is not None:
+            self.main_window.show()
+        event.accept()
 
     def apply_universal_offset(self, val):
         for spin in self.spin_offsets:

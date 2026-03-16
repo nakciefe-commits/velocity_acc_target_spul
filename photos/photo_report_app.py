@@ -451,6 +451,38 @@ class PhotoReportApp(QMainWindow):
             QMessageBox.critical(self, "Hata", f"Rapor oluşturulurken hata oluştu:\n{exc}")
             self.progress.setFormat("Hata!")
 
+    # ------------------------------------------------------------------
+    #  Batch generate: test klasöründen otomatik rapor üretimi
+    # ------------------------------------------------------------------
+    def batch_generate(self, photo_map, output_dir, folder_name, progress_callback=None):
+        """
+        photo_map: {"PRE": [path, ...], "POST": [...], ...}
+        output_dir: çıktı klasörü
+        folder_name: dosya adlarında kullanılacak isim (ör. "2026-096")
+        progress_callback: (step, total, category_title) -> None
+        Döndürür: oluşturulan dosya yollarının listesi
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        categories_to_process = {k: v for k, v in photo_map.items() if v}
+        created = []
+        total = len(categories_to_process)
+
+        for step, (category, photos) in enumerate(categories_to_process.items(), start=1):
+            if progress_callback:
+                progress_callback(step, total, self.CATEGORIES[category]["title"])
+
+            template_path = self._resolve_template_path(category)
+            if not os.path.exists(template_path):
+                raise FileNotFoundError(f"Template bulunamadı: {template_path}")
+
+            doc = self._build_document_from_template(template_path, photos, category)
+            out_name = f"{category}_{folder_name}.docx"
+            out_path = os.path.join(output_dir, out_name)
+            doc.save(out_path)
+            created.append(out_path)
+
+        return created
+
     def closeEvent(self, event):
         if self.main_window is not None:
             self.main_window.show()
